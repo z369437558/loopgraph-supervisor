@@ -62,12 +62,14 @@ class CliAgentHarness(AgentHarness):
     def probe(self) -> dict:
         try:
             proc = subprocess.run(self.version_argv, capture_output=True,
-                                  text=True, timeout=60)
+                                  text=True, encoding="utf-8",
+                                  errors="replace", timeout=60)
         except FileNotFoundError:
             raise SystemExit(
                 f"harness '{self.name}': runtime executable not found "
                 f"({self.version_argv[0]!r}); refusing to continue — a "
-                f"missing runtime is never silently replaced by a mock.")
+                f"missing runtime is never silently replaced by a mock.") \
+                from None
         return {
             "harness": self.name,
             "version_command": self.version_argv,
@@ -85,7 +87,8 @@ class CliAgentHarness(AgentHarness):
         t0 = time.monotonic()
         try:
             proc = subprocess.run(argv, cwd=workspace, capture_output=True,
-                                  text=True, timeout=self.timeout)
+                                  text=True, encoding="utf-8",
+                                  errors="replace", timeout=self.timeout)
             exit_code, out, err = proc.returncode, proc.stdout, proc.stderr
             timed_out = False
         except subprocess.TimeoutExpired as exc:

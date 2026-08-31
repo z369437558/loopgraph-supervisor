@@ -33,7 +33,8 @@ def run_tests(task_path: str, candidate_path: str, entry_point: str,
     try:
         proc = subprocess.run(
             [sys.executable, "-c", _RUNNER, task_path, candidate_path, suite],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return False, f"candidate timed out after {timeout}s", []

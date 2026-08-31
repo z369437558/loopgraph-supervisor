@@ -15,12 +15,12 @@ import os
 import time
 import uuid
 
+from . import verify as verifier
 from .harness import make_harness, resolve_harness_name
 from .journal import Journal
 from .spec import SpecStore, canonical, spec_hash
 from .state import replay
 from .versions import VersionStore
-from . import verify as verifier
 
 ROOT = os.environ.get(
     "LOOPGRAPH_HOME",

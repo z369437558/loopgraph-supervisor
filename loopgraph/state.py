@@ -5,7 +5,7 @@ reducer, so there is exactly one definition of "where is this run right now".
 """
 import copy
 
-INITIAL = {
+INITIAL: dict = {
     "status": "created",      # created|running|paused|waiting_human|succeeded|failed
     "spec_hash": None,        # LoopSpec revision this run is bound to
     "node": None,             # node id the run is currently at

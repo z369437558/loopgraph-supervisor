@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned dev tools
+        run: pip install -r requirements-dev.txt
+      - name: Lint (ruff)
+        run: python -m ruff check .
+      - name: Type-check (mypy)
+        run: python -m mypy loopgraph
+      - name: Unit + CLI integration tests
+        run: python -m pytest -q
+      # Offline end-to-end smoke with the mock runtime: two promotions and a
+      # rollback. This exercises the supervisor, not DSH — real-DSH evidence
+      # comes from journaled HARNESS_PROBED / EFFECT_RESULT entries of real
+      # runs (see README "What CI does and does not prove").
+      - name: Loop smoke (mock runtime)
+        run: |
+          python -m loopgraph run demo/slugify_auto.json --harness mock
+          python -m loopgraph run demo/slugify_auto.json --harness mock
+          python -m loopgraph rollback slugify-auto
+          python -m loopgraph versions slugify-auto
