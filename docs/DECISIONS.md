@@ -71,7 +71,18 @@ sits behind the same subprocess seam as a real runtime. It is selected
 explicitly, labeled `mock` in every journal entry, and no real-harness
 failure ever degrades into it. A failed run is a failed run.
 
-## 8. Scope: the kernel only
+## 8. Workspace and control plane live in separate trees
+
+First layout put the workspace inside the run directory — which handed any
+real runtime the holdout answers via `../task.json`. The mock never looks,
+but the boundary must hold for runtimes that do. Now the runtime's cwd tree
+(`workspaces/<run>/`) contains only the brief and the artifact, and no
+relative path from it reaches the frozen spec or journal (`runs/<run>/`). A
+test walks the workspace tree asserting no holdout value appears. Honest
+residual: a filesystem-scanning adversarial runtime still needs an OS
+sandbox — stated in the README rather than papered over.
+
+## 9. Scope: the kernel only
 
 No memory, no teams, no SSE, no database. Everything here serves the four
 things under test: the LoopSpec object, durable recovery with honest effect

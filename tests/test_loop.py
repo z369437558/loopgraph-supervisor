@@ -2,7 +2,7 @@
 import json
 import os
 
-from conftest import DEMO, cli, last_run_id, run_dir
+from conftest import DEMO, cli, last_run_id, run_dir, workspace_dir
 
 
 def journal(home, rid):
@@ -44,7 +44,7 @@ def test_reject_note_feeds_back_into_next_iteration(home):
     rid = last_run_id(home)
     cli(home, "reject", rid, "--note", "please reconsider the approach")
     instructions = open(
-        os.path.join(run_dir(home, rid), "workspace", "instructions.md"),
+        os.path.join(workspace_dir(home, rid), "instructions.md"),
         encoding="utf-8").read()
     assert "please reconsider the approach" in instructions
     out = cli(home, "approve", rid).stdout

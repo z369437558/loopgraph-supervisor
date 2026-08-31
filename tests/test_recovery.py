@@ -2,7 +2,7 @@
 import json
 import os
 
-from conftest import DEMO, cli, last_run_id, run_dir
+from conftest import DEMO, cli, last_run_id, run_dir, workspace_dir
 
 FIXED = (
     "import re\n\n"
@@ -43,7 +43,7 @@ def test_resolution_not_executed_allows_rerun(home):
 def test_resolution_completed_recovers_workspace_artifact(home):
     rid = crash_run(home)
     # Simulate: the runtime actually finished its work before the crash.
-    with open(os.path.join(run_dir(home, rid), "workspace", "candidate.py"),
+    with open(os.path.join(workspace_dir(home, rid), "candidate.py"),
               "w", encoding="utf-8") as f:
         f.write(FIXED)
     out = cli(home, "resolve-effect", rid, "--outcome", "completed").stdout

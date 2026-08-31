@@ -35,3 +35,7 @@ def last_run_id(home):
 
 def run_dir(home, run_id):
     return os.path.join(home, "runs", run_id)
+
+
+def workspace_dir(home, run_id):
+    return os.path.join(home, "workspaces", run_id)

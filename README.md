@@ -104,7 +104,7 @@ python -m loopgraph run demo/slugify.json    # DSH selected automatically
 | **Recoverable — and honest about it** | State is replayed from the journal, so kill-and-resume works anywhere *between* effects. A crash *during* a runtime invocation is different: the intent has no recorded outcome, the reducer derives `unknown_outcome`, and both `drive` and `resume` **refuse to re-execute**. A human inspects the workspace and resolves (`not-executed` → safe re-run; `completed` → recover `candidate.py` as the result). Both resolutions are journaled with the acting user. |
 | **No self-reported success** | The runtime cannot mark anything done. The verifier runs the candidate in a separate interpreter with a timeout; the holdout gate re-runs hidden cases; `promote` re-checks all preconditions itself instead of trusting the path that reached it. |
 | **HITL that actually authorizes** | An approval request carries `request_id` + candidate SHA-256 + spec revision. A decision is refused if the workspace candidate no longer matches the hash the human was shown; the decision event records the binding and the acting OS user; `promote` independently re-verifies approval-hash == current-candidate-hash. |
-| **Anti-overfitting** | Specs declare `holdout_tests` that never appear in the brief. On holdout failure the agent receives only a generic "do not overfit" message — the hidden inputs/expectations stay out of the loop — so a holdout pass is evidence of generalization, not memorization. |
+| **Anti-overfitting** | Specs declare `holdout_tests` that never appear in the brief. On holdout failure the agent receives only a generic "do not overfit" message — the hidden inputs/expectations stay out of the loop — so a holdout pass is evidence of generalization, not memorization. The runtime's workspace lives in a separate tree from the run's control plane (frozen spec, journal), so no relative path from the runtime's cwd reaches the holdout answers. |
 | **Version promotion & rollback** | Immutable versions + manifest pointer + audit log; promotion is idempotent per run (crash-safe); rollback never crosses tasks and never deletes. |
 
 ## What CI does and does not prove
@@ -138,6 +138,8 @@ loopgraph/
   cli.py           run/resume/pause/approve/reject/resolve-effect/status/
                    history/runs/versions/rollback/show/spec
 demo/              demo LoopSpecs (HITL and auto-approve variants)
+runs/              per-run control plane: frozen spec, journal, meta (runtime)
+workspaces/        per-run runtime workspaces — separate tree, no holdout
 tests/             unit + CLI integration tests (all offline)
 docs/DECISIONS.md  design log: the tradeoffs, in order
 ```
@@ -150,7 +152,11 @@ docs/DECISIONS.md  design log: the tradeoffs, in order
   binding (decision ↔ candidate hash ↔ spec revision) is the load-bearing
   part; a real deployment would put an authenticated identity in the same
   field.
-- The verifier isolates by subprocess + timeout only; untrusted candidates
-  would need a container/microVM at the same seam (`verify.py`).
+- The runtime is semi-trusted: workspace/control-plane separation keeps
+  holdout answers off every path relative to the runtime's cwd, but a truly
+  adversarial runtime that scans the filesystem can still find them. Real
+  containment (and untrusted-candidate isolation beyond the verifier's
+  subprocess + timeout) is an OS sandbox/container at the existing seams —
+  `harness.run_task` and `verify.py`.
 - Journal appends are O(n) per event (seq recount); fine at demo scale,
   trivially replaced by a kept counter or SQLite for long runs.

@@ -90,7 +90,13 @@ class Run:
 
     @property
     def workspace(self) -> str:
-        return os.path.join(self.dir, "workspace")
+        # The workspace lives in a separate tree from the run's control plane
+        # (frozen spec, journal, meta): the runtime works with cwd=workspace,
+        # and nothing above it on the path leads to the holdout answers or
+        # the journal. A merely curious runtime finds only its own brief and
+        # artifact; a truly adversarial one needs OS-level sandboxing, which
+        # is documented as out of scope (see README limitations).
+        return os.path.join(ROOT, "workspaces", self.run_id)
 
     @property
     def candidate_path(self) -> str:

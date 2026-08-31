@@ -3,13 +3,13 @@ promotion without leaking into the agent loop."""
 import json
 import os
 
-from conftest import DEMO, cli, last_run_id, run_dir
+from conftest import DEMO, cli, last_run_id, workspace_dir
 
 
 def test_stale_approval_is_refused_after_candidate_changes(home):
     cli(home, "run", os.path.join(DEMO, "slugify.json"), "--harness", "mock")
     rid = last_run_id(home)
-    cand = os.path.join(run_dir(home, rid), "workspace", "candidate.py")
+    cand = os.path.join(workspace_dir(home, rid), "candidate.py")
     with open(cand, encoding="utf-8") as f:
         original = f.read()
     with open(cand, "w", encoding="utf-8") as f:
@@ -40,9 +40,27 @@ def test_holdout_failure_loops_generically_and_never_leaks(home, tmp_path):
     assert "holdout" in out
     rid = last_run_id(home)
     instructions = open(
-        os.path.join(run_dir(home, rid), "workspace", "instructions.md"),
+        os.path.join(workspace_dir(home, rid), "instructions.md"),
         encoding="utf-8").read()
     assert "keep_underscores" not in instructions
     assert "hidden holdout evaluation" in instructions  # generic message only
     assert not os.path.exists(
         os.path.join(home, "artifacts", "slugify-impossible", "manifest.json"))
+
+
+def test_workspace_tree_is_separated_from_holdout_answers(home):
+    # The runtime works with cwd=workspace. Nothing in the workspace tree may
+    # contain a holdout-only value, and the run's control plane (frozen spec
+    # with holdout answers, journal) must not sit on the workspace's parent
+    # chain where a relative path would reach it.
+    cli(home, "run", os.path.join(DEMO, "slugify.json"), "--harness", "mock")
+    rid = last_run_id(home)
+    ws = workspace_dir(home, rid)
+    for root, _, files in os.walk(ws):
+        for name in files:
+            content = open(os.path.join(root, name), encoding="utf-8",
+                           errors="replace").read()
+            assert "already-slugged" not in content  # holdout-only input
+    control = os.path.join(home, "runs", rid)
+    assert os.path.exists(os.path.join(control, "task.json"))
+    assert not os.path.abspath(ws).startswith(os.path.abspath(control))
