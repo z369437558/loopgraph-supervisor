@@ -1,14 +1,15 @@
-"""LoopGraph supervisor: walks the task's node graph, journaling every step.
+"""LoopGraph supervisor: interprets a task's LoopSpec graph, journaling every
+step. The drive loop never holds state that is not already in the journal, so
+the process can be killed between any two node executions and `resume`
+continues exactly where it stopped.
 
-The drive loop never holds state that is not already in the journal, so the
-process can be killed between any two node executions and `resume` continues
-exactly where it stopped. Node execution is at-least-once: a crash inside a
-node re-executes that node on resume (generation and verification are safe to
-repeat; promotion appends a new immutable version, never overwrites).
+The harness is an agent runtime driven through a process-level contract (see
+harness.py): the supervisor writes the task brief into the run's workspace,
+launches the runtime, and afterwards picks up <workspace>/candidate.py. The
+runtime's own opinion of its success is never used — verification is external.
 """
 import json
 import os
-import shutil
 import time
 import uuid
 
@@ -24,12 +25,6 @@ ROOT = os.environ.get(
 )
 RUNS_DIR = os.path.join(ROOT, "runs")
 
-SYSTEM_PROMPT = (
-    "You are a coding agent inside an automated improve-verify loop. "
-    "Reply with a single fenced ```python code block containing the complete, "
-    "self-contained implementation, and nothing else."
-)
-
 
 class Run:
     def __init__(self, run_id: str):
@@ -43,16 +38,21 @@ class Run:
             task = json.load(f)
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         run = cls(run_id)
-        os.makedirs(run.dir, exist_ok=True)
-        # The run directory is self-contained: task spec, meta, journal,
-        # candidates. Copy the task in so later edits to the original file
-        # cannot change a run's semantics mid-flight.
-        shutil.copyfile(task_path, run.task_path)
+        os.makedirs(run.workspace, exist_ok=True)
+        # The run directory is self-contained: frozen task spec, meta,
+        # journal, workspace. The spec is frozen at creation so later edits
+        # to the original file cannot change a run's semantics mid-flight.
+        with open(run.task_path, "w", encoding="utf-8") as f:
+            json.dump(task, f, indent=2)
         with open(os.path.join(run.dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"harness": harness_name, "task_id": task["task_id"]}, f)
+        # Probe the runtime before journaling the start: the probe output is
+        # the per-run pin evidence of exactly which runtime build is in use.
+        probe = make_harness(harness_name).probe()
         run.journal.append("RUN_STARTED", task_id=task["task_id"],
                            entry_node=task["graph"]["entry"],
                            harness=harness_name)
+        run.journal.append("HARNESS_PROBED", **probe)
         return run
 
     @property
@@ -70,8 +70,12 @@ class Run:
             return json.load(f)
 
     @property
+    def workspace(self) -> str:
+        return os.path.join(self.dir, "workspace")
+
+    @property
     def candidate_path(self) -> str:
-        return os.path.join(self.dir, "candidate.py")
+        return os.path.join(self.workspace, "candidate.py")
 
     def state(self) -> dict:
         return replay(self.journal.read())
@@ -94,33 +98,38 @@ class Run:
             json.dump(c, f)
 
 
-def extract_code(text: str) -> str:
-    if "```" in text:
-        block = text.split("```", 2)[1]
-        if block.lstrip().startswith("python"):
-            block = block.lstrip()[len("python"):]
-        return block.strip() + "\n"
-    return text.strip() + "\n"
-
-
-def build_prompt(task: dict, state: dict) -> str:
+def build_instructions(task: dict, state: dict) -> str:
+    """The task brief handed to the agent runtime. Contains only the visible
+    tests — holdout cases must never appear here."""
     entry = task["entry_point"]
-    parts = [f"Goal: {task['goal']}", f"Function name: {entry}",
-             "Test cases the implementation must pass:"]
+    lines = [
+        "# Task brief",
+        f"Goal: {task['goal']}",
+        f"Function name: `{entry}`",
+        "",
+        "Visible test cases the implementation must pass:",
+    ]
     for t in task["tests"]:
-        parts.append(f"- {entry}({t['input']!r}) == {t['expected']!r}")
+        lines.append(f"- `{entry}({t['input']!r}) == {t['expected']!r}`")
+    lines += [
+        "",
+        "## Output contract",
+        "Write the complete, self-contained implementation to `candidate.py`",
+        "in this directory, then exit. Do not claim success yourself —",
+        "an external verifier is the only judge of the artifact.",
+    ]
     if state["candidate"]:
-        parts.append("\nYour previous attempt:\n```python\n"
-                     + state["candidate"] + "```")
+        lines += ["", "## Previous attempt", "```python",
+                  state["candidate"].rstrip(), "```"]
     if state["feedback"]:
-        parts.append("\nFEEDBACK on the previous attempt:\n" + state["feedback"])
-    return "\n".join(parts)
+        lines += ["", "## FEEDBACK on the previous attempt", state["feedback"]]
+    return "\n".join(lines) + "\n"
 
 
 def drive(run: Run, max_nodes: int | None = None):
-    """Execute graph nodes until the run reaches a stopping condition:
-    terminal state, waiting on a human, an external pause request, or the
-    step budget (used to demonstrate kill-and-resume)."""
+    """Execute graph nodes until a stopping condition: terminal state, waiting
+    on a human, an external pause request, or the step budget (used to
+    demonstrate kill-and-resume)."""
     task = run.task
     nodes = task["graph"]["nodes"]
     harness = make_harness(run.meta["harness"])
@@ -164,12 +173,25 @@ def drive(run: Run, max_nodes: int | None = None):
 
         if node["type"] == "agent":
             iteration = state["iteration"] + 1
-            print(f"[{run.run_id}] {node_id}: generating candidate "
-                  f"(iteration {iteration}, harness={harness.name}) ...")
-            raw = harness.complete(SYSTEM_PROMPT, build_prompt(task, state))
-            code = extract_code(raw)
-            with open(run.candidate_path, "w", encoding="utf-8") as f:
-                f.write(code)
+            with open(os.path.join(run.workspace, "instructions.md"), "w",
+                      encoding="utf-8") as f:
+                f.write(build_instructions(task, state))
+            print(f"[{run.run_id}] {node_id}: launching {harness.name} runtime "
+                  f"over workspace (iteration {iteration}) ...")
+            meta = harness.run_task(run.workspace)
+            produced = os.path.exists(run.candidate_path)
+            ok = meta["exit_code"] == 0 and produced
+            run.journal.append("HARNESS_RUN", ok=ok, iteration=iteration,
+                               meta=meta)
+            if not ok:
+                why = ("runtime exited "
+                       f"{meta['exit_code']}" if meta["exit_code"] != 0
+                       else "runtime produced no candidate.py")
+                run.journal.append("RUN_FINISHED", status="failed",
+                                   reason=f"harness invocation failed: {why}")
+                continue
+            with open(run.candidate_path, encoding="utf-8") as f:
+                code = f.read()
             run.journal.append("GENERATED", iteration=iteration, code=code)
             run.journal.append("EDGE_TAKEN", frm=node_id, to=node["next"],
                                label="next")
