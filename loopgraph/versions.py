@@ -28,7 +28,9 @@ class VersionStore:
         with open(self.manifest_path, "w", encoding="utf-8") as f:
             json.dump(m, f, indent=2)
 
-    def promote(self, candidate_path: str, run_id: str) -> int:
+    def promote(self, candidate_path: str, run_id: str,
+                candidate_hash: str | None = None,
+                spec_hash: str | None = None) -> int:
         m = self.manifest()
         # Crash-recovery idempotency: a run promotes at most once, so if this
         # run already has a version (crash after copy, before the journal
@@ -40,7 +42,9 @@ class VersionStore:
         dst = os.path.join(self.dir, f"v{n}.py")
         shutil.copyfile(candidate_path, dst)
         m["versions"].append({"version": n, "run_id": run_id, "ts": _now(),
-                              "file": os.path.basename(dst)})
+                              "file": os.path.basename(dst),
+                              "candidate_hash": candidate_hash,
+                              "spec_hash": spec_hash})
         m["log"].append({"ts": _now(), "action": "promote",
                          "from": m["current"], "to": n, "run_id": run_id})
         m["current"] = n

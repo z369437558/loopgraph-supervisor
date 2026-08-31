@@ -13,7 +13,7 @@ ns = {}
 exec(open(sys.argv[2], encoding="utf-8").read(), ns)
 fn = ns[spec["entry_point"]]
 results = []
-for case in spec["tests"]:
+for case in spec[sys.argv[3]]:
     try:
         got = fn(case["input"])
         results.append({"input": case["input"], "expected": case["expected"],
@@ -27,11 +27,12 @@ print(json.dumps(results))
 
 
 def run_tests(task_path: str, candidate_path: str, entry_point: str,
-              timeout: int = 20):
-    """Returns (passed, feedback, results)."""
+              suite: str = "tests", timeout: int = 20):
+    """Run one test suite of the spec ('tests' or 'holdout_tests') against
+    the candidate. Returns (passed, feedback, results)."""
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", _RUNNER, task_path, candidate_path],
+            [sys.executable, "-c", _RUNNER, task_path, candidate_path, suite],
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:

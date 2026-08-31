@@ -9,6 +9,7 @@ launches the runtime, and afterwards picks up <workspace>/candidate.py. The
 runtime's own opinion of its success is never used — verification is external.
 """
 import getpass
+import hashlib
 import json
 import os
 import time
@@ -26,6 +27,19 @@ ROOT = os.environ.get(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )
 RUNS_DIR = os.path.join(ROOT, "runs")
+
+# When the hidden holdout fails, the agent gets ONLY this message — holdout
+# inputs and expectations never enter the loop, otherwise "generalization"
+# would just be a second visible test set.
+GENERIC_HOLDOUT_FEEDBACK = (
+    "The candidate passed the visible tests but failed a hidden holdout "
+    "evaluation. Do not overfit to the listed examples; implement the stated "
+    "goal in full generality.")
+
+
+def file_hash(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()[:16]
 
 
 class Run:
@@ -253,20 +267,72 @@ def drive(run: Run, max_nodes: int | None = None):
                                        to=node["on_fail"], label="fail")
 
         elif node["type"] == "hitl":
+            # The hidden holdout gate runs first — with or without a human in
+            # the loop, a candidate that only memorized the visible tests
+            # must not reach promotion.
+            if task.get("holdout_tests"):
+                h_passed, h_detail, h_results = verifier.run_tests(
+                    run.task_path, run.candidate_path, task["entry_point"],
+                    suite="holdout_tests")
+                run.journal.append(
+                    "HOLDOUT_VERIFIED", passed=h_passed, results=h_results,
+                    detail=h_detail,
+                    agent_feedback=None if h_passed else GENERIC_HOLDOUT_FEEDBACK)
+                if not h_passed:
+                    n_fail = sum(1 for r in h_results if not r["passed"])
+                    print(f"  holdout FAIL ({n_fail}/{len(h_results)} hidden "
+                          f"cases); details stay out of the agent loop")
+                    max_iters = task.get("max_iterations", 5)
+                    if state["iteration"] >= max_iters:
+                        run.journal.append(
+                            "RUN_FINISHED", status="failed",
+                            reason=f"holdout still failing after "
+                                   f"{max_iters} iterations")
+                    else:
+                        run.journal.append("EDGE_TAKEN", frm=node_id,
+                                           to=node["on_reject"],
+                                           label="holdout-fail")
+                    continue
+                print(f"  holdout PASS ({len(h_results)} hidden cases)")
             if not task.get("hitl", True):
                 run.journal.append("EDGE_TAKEN", frm=node_id,
                                    to=node["on_approve"], label="auto-approve")
             else:
-                preview = (state["candidate"] or "")[:800]
+                # The approval request is bound to this exact candidate and
+                # spec revision; a decision only applies if the binding still
+                # holds when it is made (see decide()).
                 run.journal.append(
                     "HITL_REQUESTED",
+                    request_id=uuid.uuid4().hex[:12],
+                    candidate_hash=file_hash(run.candidate_path),
+                    spec_hash=run.meta.get("spec_hash"),
+                    iteration=state["iteration"],
                     question=f"Promote iteration {state['iteration']} of "
                              f"'{task['task_id']}' to a new version?",
-                    candidate_preview=preview)
+                    candidate_preview=(state["candidate"] or "")[:800])
 
         elif node["type"] == "promote":
+            # Defense in depth: promotion re-checks its preconditions instead
+            # of trusting that only legal paths reach this node.
+            if task.get("holdout_tests") and not (
+                    state["holdout"] and state["holdout"]["passed"]):
+                run.journal.append("RUN_FINISHED", status="failed",
+                                   reason="promotion blocked: holdout is not "
+                                          "green for the current candidate")
+                continue
+            if task.get("hitl", True):
+                approval = state["last_approval"]
+                current = file_hash(run.candidate_path)
+                if not approval or approval["candidate_hash"] != current:
+                    run.journal.append(
+                        "RUN_FINISHED", status="failed",
+                        reason="promotion blocked: no approval is bound to "
+                               "the current candidate")
+                    continue
             store = VersionStore(ROOT, task["task_id"])
-            version = store.promote(run.candidate_path, run.run_id)
+            version = store.promote(run.candidate_path, run.run_id,
+                                    candidate_hash=file_hash(run.candidate_path),
+                                    spec_hash=run.meta.get("spec_hash"))
             run.journal.append("VERSION_PROMOTED", version=version,
                                file=f"v{version}.py")
             run.journal.append("RUN_FINISHED", status="succeeded")
@@ -332,9 +398,23 @@ def decide(run_id: str, decision: str, note: str | None):
     if state["status"] != "waiting_human":
         raise SystemExit(f"run {run_id} is '{state['status']}', not waiting on "
                          f"a human decision")
+    request = state["hitl"]
+    # An approval is only valid for the exact candidate it was requested for:
+    # if the artifact changed since the request, the decision must not carry
+    # over to content the human never looked at.
+    current = file_hash(run.candidate_path)
+    if current != request["candidate_hash"]:
+        raise SystemExit(
+            f"refusing {decision}: the candidate changed since this approval "
+            f"was requested (requested for {request['candidate_hash']}, "
+            f"workspace now has {current}). Re-verify before deciding.")
     node = run.task["graph"]["nodes"][state["node"]]
     run.journal.append("HITL_DECISION", decision=decision, note=note,
-                       decided_at_node=state["node"])
+                       decided_at_node=state["node"],
+                       request_id=request["request_id"],
+                       candidate_hash=current,
+                       spec_hash=request.get("spec_hash"),
+                       actor=getpass.getuser())
     target = node["on_approve"] if decision == "approve" else node["on_reject"]
     run.journal.append("EDGE_TAKEN", frm=state["node"], to=target,
                        label=decision)

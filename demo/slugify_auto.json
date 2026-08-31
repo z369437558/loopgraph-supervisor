@@ -1,9 +1,9 @@
 {
-  "task_id": "slugify",
+  "task_id": "slugify-auto",
   "goal": "Implement slugify(text): lowercase the input, replace every run of non-alphanumeric characters with a single hyphen, and strip leading/trailing hyphens.",
   "entry_point": "slugify",
   "max_iterations": 5,
-  "hitl": true,
+  "hitl": false,
   "tests": [
     {"input": "Hello World", "expected": "hello-world"},
     {"input": "  Hello,   World!  ", "expected": "hello-world"},
