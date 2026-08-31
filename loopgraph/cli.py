@@ -5,6 +5,7 @@ import json
 import os
 
 from . import supervisor
+from .spec import SpecStore
 from .supervisor import ROOT, RUNS_DIR, Run
 from .versions import VersionStore
 
@@ -15,6 +16,8 @@ def _print_status(run: Run):
     graph = task["graph"]["nodes"]
     print(f"run:       {run.run_id}")
     print(f"task:      {task['task_id']}  (harness={run.meta['harness']})")
+    if state["spec_hash"]:
+        print(f"spec:      {state['spec_hash'][:12]} (immutable revision)")
     print(f"status:    {state['status']}"
           + (f"  ({state['finish_reason']})" if state["finish_reason"] else ""))
     print(f"iteration: {state['iteration']}/{task.get('max_iterations', 5)}")
@@ -95,6 +98,11 @@ def main(argv=None):
     p = sub.add_parser("show", help="print the current promoted artifact")
     p.add_argument("task_id")
 
+    p = sub.add_parser("spec", help="list registered LoopSpec revisions of a "
+                                    "task, or print one")
+    p.add_argument("task_id")
+    p.add_argument("--show", metavar="HASH", help="print this revision")
+
     args = ap.parse_args(argv)
 
     if args.cmd == "run":
@@ -138,6 +146,16 @@ def main(argv=None):
     elif args.cmd == "rollback":
         to = VersionStore(ROOT, args.task_id).rollback(args.to)
         print(f"current version of '{args.task_id}' is now v{to}")
+    elif args.cmd == "spec":
+        store = SpecStore(ROOT)
+        if args.show:
+            print(json.dumps(store.load(args.task_id, args.show), indent=2))
+        else:
+            revs = store.revisions(args.task_id)
+            if not revs:
+                print("(no registered revisions)")
+            for r in revs:
+                print(r["hash"])
     elif args.cmd == "show":
         f = VersionStore(ROOT, args.task_id).current_file()
         if f is None:

@@ -7,6 +7,7 @@ import copy
 
 INITIAL = {
     "status": "created",      # created|running|paused|waiting_human|succeeded|failed
+    "spec_hash": None,        # LoopSpec revision this run is bound to
     "node": None,             # node id the run is currently at
     "iteration": 0,
     "candidate": None,        # latest generated artifact (source text)
@@ -25,6 +26,7 @@ def replay(events: list) -> dict:
         if t == "RUN_STARTED":
             s["status"] = "running"
             s["node"] = p["entry_node"]
+            s["spec_hash"] = p.get("spec_hash")
         elif t == "NODE_STARTED":
             s["node"] = p["node"]
         elif t == "GENERATED":

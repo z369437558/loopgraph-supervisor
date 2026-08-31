@@ -15,6 +15,7 @@ import uuid
 
 from .harness import make_harness, resolve_harness_name
 from .journal import Journal
+from .spec import SpecStore, canonical, spec_hash
 from .state import replay
 from .versions import VersionStore
 from . import verify as verifier
@@ -36,22 +37,25 @@ class Run:
     def create(cls, task_path: str, harness_name: str) -> "Run":
         with open(task_path, encoding="utf-8") as f:
             task = json.load(f)
+        # Register the spec revision (content-addressed, immutable) before
+        # anything else: the run is bound to that exact revision.
+        h = SpecStore(ROOT).register(task)
         run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         run = cls(run_id)
         os.makedirs(run.workspace, exist_ok=True)
-        # The run directory is self-contained: frozen task spec, meta,
-        # journal, workspace. The spec is frozen at creation so later edits
-        # to the original file cannot change a run's semantics mid-flight.
+        # The run directory is self-contained: frozen spec (canonical form,
+        # so its hash can be re-verified), meta, journal, workspace.
         with open(run.task_path, "w", encoding="utf-8") as f:
-            json.dump(task, f, indent=2)
+            f.write(canonical(task))
         with open(os.path.join(run.dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"harness": harness_name, "task_id": task["task_id"]}, f)
+            json.dump({"harness": harness_name, "task_id": task["task_id"],
+                       "spec_hash": h}, f)
         # Probe the runtime before journaling the start: the probe output is
         # the per-run pin evidence of exactly which runtime build is in use.
         probe = make_harness(harness_name).probe()
         run.journal.append("RUN_STARTED", task_id=task["task_id"],
                            entry_node=task["graph"]["entry"],
-                           harness=harness_name)
+                           harness=harness_name, spec_hash=h)
         run.journal.append("HARNESS_PROBED", **probe)
         return run
 
@@ -131,6 +135,12 @@ def drive(run: Run, max_nodes: int | None = None):
     on a human, an external pause request, or the step budget (used to
     demonstrate kill-and-resume)."""
     task = run.task
+    expected = run.meta.get("spec_hash")
+    if expected and spec_hash(task) != expected:
+        raise SystemExit(
+            f"refusing to drive {run.run_id}: its frozen spec no longer "
+            f"matches the registered revision {expected[:12]} — the spec is "
+            f"immutable; start a new run for a new revision.")
     nodes = task["graph"]["nodes"]
     harness = make_harness(run.meta["harness"])
     executed = 0
