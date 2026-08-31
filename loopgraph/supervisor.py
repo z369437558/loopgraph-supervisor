@@ -8,6 +8,7 @@ harness.py): the supervisor writes the task brief into the run's workspace,
 launches the runtime, and afterwards picks up <workspace>/candidate.py. The
 runtime's own opinion of its success is never used — verification is external.
 """
+import getpass
 import json
 import os
 import time
@@ -154,6 +155,18 @@ def drive(run: Run, max_nodes: int | None = None):
             if state["promoted_version"]:
                 print(f"  promoted version: v{state['promoted_version']}")
             return
+        if state["status"] == "unknown_outcome":
+            eff = state["pending_effect"] or {}
+            print(f"[{run.run_id}] parked: effect {eff.get('effect_id')} "
+                  f"({eff.get('kind')} via {eff.get('harness')}) was started "
+                  f"but has no recorded outcome — NOT retrying automatically.")
+            print(f"  inspect {run.workspace} (candidate.py content/mtime), "
+                  f"then resolve with one of:")
+            print(f"    python -m loopgraph resolve-effect {run.run_id} "
+                  f"--outcome not-executed   (safe to re-run the runtime)")
+            print(f"    python -m loopgraph resolve-effect {run.run_id} "
+                  f"--outcome completed      (recover candidate.py as the result)")
+            return
         if state["status"] == "waiting_human":
             q = state["hitl"] or {}
             print(f"[{run.run_id}] waiting for human decision at node "
@@ -186,13 +199,25 @@ def drive(run: Run, max_nodes: int | None = None):
             with open(os.path.join(run.workspace, "instructions.md"), "w",
                       encoding="utf-8") as f:
                 f.write(build_instructions(task, state))
+            # A runtime invocation is an external effect with arbitrary side
+            # effects: journal the intent BEFORE launching, so a crash while
+            # the runtime is (possibly) working leaves an unambiguous
+            # unknown-outcome marker instead of an invisible gap.
+            effect_id = uuid.uuid4().hex[:12]
+            run.journal.append("EFFECT_INTENT", effect_id=effect_id,
+                               kind="harness.run_task", harness=harness.name,
+                               node=node_id, iteration=iteration)
+            if os.environ.get("LOOPGRAPH_CRASH_AFTER_INTENT"):
+                print(f"[{run.run_id}] simulated crash after effect intent "
+                      f"{effect_id} (LOOPGRAPH_CRASH_AFTER_INTENT)")
+                raise SystemExit(70)
             print(f"[{run.run_id}] {node_id}: launching {harness.name} runtime "
                   f"over workspace (iteration {iteration}) ...")
             meta = harness.run_task(run.workspace)
             produced = os.path.exists(run.candidate_path)
             ok = meta["exit_code"] == 0 and produced
-            run.journal.append("HARNESS_RUN", ok=ok, iteration=iteration,
-                               meta=meta)
+            run.journal.append("EFFECT_RESULT", effect_id=effect_id, ok=ok,
+                               iteration=iteration, meta=meta)
             if not ok:
                 why = ("runtime exited "
                        f"{meta['exit_code']}" if meta["exit_code"] != 0
@@ -267,6 +292,38 @@ def resume(run_id: str, max_nodes: int | None):
     if state["status"] == "paused":
         run.journal.append("RUN_RESUMED")
     drive(run, max_nodes)
+
+
+def resolve_effect(run_id: str, outcome: str, note: str | None):
+    """Human resolution of an unknown-outcome effect. 'not-executed' declares
+    the runtime never did its work (safe to re-run); 'completed' declares the
+    runtime finished and its artifact is recovered from the workspace. The
+    caller is expected to have inspected the workspace first — that judgment
+    is exactly what must not be automated."""
+    run = Run(run_id)
+    state = run.state()
+    if state["status"] != "unknown_outcome":
+        raise SystemExit(f"run {run_id} has no unresolved effect "
+                         f"(status: {state['status']})")
+    eff = state["pending_effect"]
+    actor = getpass.getuser()
+    if outcome == "completed":
+        if not os.path.exists(run.candidate_path):
+            raise SystemExit("cannot resolve as completed: the workspace has "
+                             "no candidate.py to recover")
+        with open(run.candidate_path, encoding="utf-8") as f:
+            code = f.read()
+        run.journal.append("EFFECT_RESOLVED", effect_id=eff["effect_id"],
+                           outcome=outcome, actor=actor, note=note)
+        run.journal.append("GENERATED", iteration=eff["iteration"], code=code,
+                           recovered="from workspace after human confirmation")
+        node = run.task["graph"]["nodes"][eff["node"]]
+        run.journal.append("EDGE_TAKEN", frm=eff["node"], to=node["next"],
+                           label="next")
+    else:
+        run.journal.append("EFFECT_RESOLVED", effect_id=eff["effect_id"],
+                           outcome=outcome, actor=actor, note=note)
+    drive(run)
 
 
 def decide(run_id: str, decision: str, note: str | None):

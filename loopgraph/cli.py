@@ -22,6 +22,10 @@ def _print_status(run: Run):
           + (f"  ({state['finish_reason']})" if state["finish_reason"] else ""))
     print(f"iteration: {state['iteration']}/{task.get('max_iterations', 5)}")
     print(f"verified:  {state['verified']}")
+    if state["pending_effect"]:
+        eff = state["pending_effect"]
+        print(f"pending:   effect {eff['effect_id']} ({eff['kind']}) has no "
+              f"recorded outcome — resolve before the run can continue")
     if state["promoted_version"]:
         print(f"promoted:  v{state['promoted_version']}")
     print("graph:")
@@ -79,6 +83,14 @@ def main(argv=None):
     p.add_argument("run_id")
     p.add_argument("--note")
 
+    p = sub.add_parser("resolve-effect",
+                       help="resolve an unknown-outcome effect after "
+                            "inspecting the workspace")
+    p.add_argument("run_id")
+    p.add_argument("--outcome", required=True,
+                   choices=["not-executed", "completed"])
+    p.add_argument("--note")
+
     p = sub.add_parser("status", help="show run state and graph position")
     p.add_argument("run_id")
 
@@ -114,6 +126,8 @@ def main(argv=None):
         run.set_control(pause=True)
         print(f"pause requested for {args.run_id}; it takes effect at the next "
               f"node boundary of a live driver, and is honored by `resume`.")
+    elif args.cmd == "resolve-effect":
+        supervisor.resolve_effect(args.run_id, args.outcome, args.note)
     elif args.cmd == "approve":
         supervisor.decide(args.run_id, "approve", args.note)
     elif args.cmd == "reject":

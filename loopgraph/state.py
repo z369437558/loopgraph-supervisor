@@ -15,6 +15,7 @@ INITIAL = {
     "verified": False,
     "promoted_version": None,
     "hitl": None,             # pending HITL request payload, if any
+    "pending_effect": None,   # journaled effect intent with no recorded outcome
     "finish_reason": None,
 }
 
@@ -37,6 +38,10 @@ def replay(events: list) -> dict:
             s["feedback"] = p["feedback"]
         elif t == "EDGE_TAKEN":
             s["node"] = p["to"]
+        elif t == "EFFECT_INTENT":
+            s["pending_effect"] = p
+        elif t in ("EFFECT_RESULT", "EFFECT_RESOLVED"):
+            s["pending_effect"] = None
         elif t == "HITL_REQUESTED":
             s["status"] = "waiting_human"
             s["hitl"] = p
@@ -55,4 +60,9 @@ def replay(events: list) -> dict:
         elif t == "RUN_FINISHED":
             s["status"] = p["status"]
             s["finish_reason"] = p.get("reason")
+    # An intent with no recorded outcome means the process died mid-effect:
+    # the effect may or may not have happened. That is an unknown outcome and
+    # must never be retried automatically (single-writer per run is assumed).
+    if s["pending_effect"] is not None and s["status"] == "running":
+        s["status"] = "unknown_outcome"
     return s

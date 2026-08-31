@@ -30,6 +30,12 @@ class VersionStore:
 
     def promote(self, candidate_path: str, run_id: str) -> int:
         m = self.manifest()
+        # Crash-recovery idempotency: a run promotes at most once, so if this
+        # run already has a version (crash after copy, before the journal
+        # event), reuse it instead of promoting a duplicate.
+        for v in m["versions"]:
+            if v["run_id"] == run_id:
+                return v["version"]
         n = len(m["versions"]) + 1
         dst = os.path.join(self.dir, f"v{n}.py")
         shutil.copyfile(candidate_path, dst)
