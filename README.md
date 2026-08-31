@@ -1,131 +1,156 @@
 # LoopGraph Supervisor
 
 A **DSH-first, harness-neutral, durably-recoverable** supervisor for agent
-loops — an MVP of the RSI (recursive self-improvement) shape: an agent
-generates an artifact, an independent verifier tests it, failures feed back
-into the next iteration, a human gates promotion, and every promoted version
-is immutable and rollbackable.
+improvement loops: an agent runtime produces an artifact, an independent
+verifier tests it, failures feed back into the next iteration, a hidden
+holdout guards against overfitting, a human approval — bound to the exact
+candidate — gates promotion, and every promoted version is immutable and
+rollbackable.
 
-Pure Python stdlib. No frameworks, no dependencies, no API key required to run
-the full demo.
+Pure Python stdlib at runtime. No API keys or network needed to run the full
+demo: the mock runtime exercises every path offline and deterministically.
 
-## Quickstart (offline, deterministic)
+## The three objects
+
+1. **LoopSpec** — the graph is data, and it is *first-class*: a spec revision
+   is the SHA-256 of its canonical JSON, registered in an append-only,
+   content-addressed `SpecStore`. Runs freeze the exact revision they
+   execute; the driver refuses to run if the frozen spec no longer matches
+   its registered hash. Formatting edits don't change a revision; semantic
+   edits do, and require a new run.
+2. **Run** — an append-only event journal (`journal.jsonl`). Run state is a
+   pure fold over events (`state.py`); recovery, resume, status, and HITL
+   routing all share that single reducer.
+3. **Version** — promoted artifacts are immutable `vN.py` files with a
+   manifest `current` pointer recording candidate hash, spec revision, and a
+   promote/rollback log. Rollback moves the pointer; nothing is deleted.
+
+## The harness is an agent runtime, not a model API
+
+DSH (DeepSeek Harness) is an agent runtime. The supervisor therefore drives
+harnesses through a **process-level contract**, not a chat endpoint:
+
+1. the supervisor writes the task brief to `<workspace>/instructions.md`
+2. it launches the runtime process with the workspace as its working
+   directory
+3. the runtime — an autonomous agent session with its own model calls, tools
+   and side effects — writes `candidate.py` into the workspace and exits
+4. the runtime's own opinion of its success is **never used**; the
+   out-of-process verifier is the only judge
+
+`DSHHarness` launches the real runtime via a pinned command
+(`LOOPGRAPH_DSH_CMD`, e.g. `dsh run --workspace {workspace} --brief
+{instructions}`) — flags are configured, never guessed — and journals the
+runtime's `--version` probe with every run, so a journal always shows exactly
+which DSH build produced a candidate. Any other CLI runtime (Claude Code, a
+local agent) plugs in through the same `CliAgentHarness` seam. The mock
+runtime lives behind the same subprocess boundary. A failing real harness is
+a **failed run**, loudly — never converted into a mock or simulated result.
+
+## Quickstart (offline)
 
 ```bash
 # 1. Start a run. --step 3 executes 3 graph nodes then EXITS THE PROCESS,
-#    to prove that state survives process death.
+#    to show that state survives process death.
 python -m loopgraph run demo/slugify.json --harness mock --step 3
-
-# 2. Observe, then resume — it continues exactly where it stopped.
 python -m loopgraph status  <run_id>
-python -m loopgraph resume  <run_id>
-# ... verification passes, the run parks at the HITL gate and exits.
+python -m loopgraph resume  <run_id>     # continues exactly where it stopped
 
-# 3. Human-in-the-loop: reject once (your note becomes agent feedback),
-#    then approve.
+# 2. The verified candidate passed the hidden holdout and is parked at the
+#    HITL gate. Reject once (your note becomes agent feedback), then approve.
 python -m loopgraph reject  <run_id> --note "keep it stdlib-only"
-python -m loopgraph approve <run_id>          # -> promoted as v1
+python -m loopgraph approve <run_id>     # -> promoted as v1
 
-# 4. Versions & rollback.
+# 3. Versions, audit, rollback.
 python -m loopgraph versions slugify
-python -m loopgraph rollback slugify          # current pointer moves back
-python -m loopgraph show     slugify          # print current artifact
-python -m loopgraph history  <run_id>         # full audit trail
+python -m loopgraph rollback slugify
+python -m loopgraph history  <run_id>    # full event journal
+python -m loopgraph spec     slugify     # registered LoopSpec revisions
 ```
 
-To run against the real DeepSeek Harness instead of the mock:
+Unknown-outcome demo (the part that must *not* self-heal):
 
 ```bash
-export DEEPSEEK_API_KEY=sk-...     # optionally DEEPSEEK_MODEL / DEEPSEEK_BASE_URL
-python -m loopgraph run demo/slugify.json   # DSH is picked automatically
+LOOPGRAPH_CRASH_AFTER_INTENT=1 python -m loopgraph run demo/slugify.json --harness mock
+# process dies while a runtime invocation is (possibly) in flight
+python -m loopgraph resume <run_id>          # parks; does NOT retry
+python -m loopgraph resolve-effect <run_id> --outcome not-executed
 ```
 
-## The LoopGraph
+With a real DSH runtime installed:
 
-A task spec (`demo/slugify.json`) declares a graph of typed nodes; the
-supervisor is a generic interpreter over it:
-
-```
-            ┌────────────── fail (with verifier feedback) ─────────────┐
-            │                                                          │
-   ┌────────▼───────┐        ┌──────────┐   pass    ┌──────┐  approve  ┌─────────┐
-   │ generate:agent ├───────▶│  verify  ├──────────▶│ hitl ├──────────▶│ promote │
-   └────────▲───────┘        └──────────┘           └──┬───┘           └─────────┘
-            │                                          │
-            └────────── reject (note becomes feedback) ┘
+```bash
+export LOOPGRAPH_DSH_CMD='dsh run --workspace {workspace} --brief {instructions}'
+python -m loopgraph run demo/slugify.json    # DSH selected automatically
 ```
 
-- **agent** — asks the harness for a candidate (prompt includes the previous
-  attempt + accumulated feedback).
-- **verify** — runs the candidate against the task's test cases in a separate
-  interpreter process (isolation + timeout); failures become structured
-  feedback. `max_iterations` bounds the loop.
-- **hitl** — parks the run in `waiting_human` and exits; `approve` / `reject`
-  are journaled decisions. A reject's note is injected into the next
-  generation prompt — the human is a first-class feedback source, same as the
-  verifier.
-- **promote** — copies the verified candidate into the immutable version store
-  and advances the `current` pointer.
+## The graph (demo spec)
 
-## How each requirement is met
+```
+            ┌──────────── fail (verifier feedback) ───────────────┐
+            │                                    ┌── holdout-fail ┤ (generic msg only)
+   ┌────────▼───────┐      ┌──────────┐  pass   ┌┴─────┐ approve  ┌─────────┐
+   │ generate:agent ├─────▶│  verify  ├────────▶│ hitl ├─────────▶│ promote │
+   └────────▲───────┘      └──────────┘         └──┬───┘          └─────────┘
+            └───────────── reject (note becomes feedback) ┘
+```
 
-| Requirement | Mechanism |
+## Boundaries, and how each is enforced
+
+| Boundary | Mechanism |
 |---|---|
-| **Observable** | Every transition is an event in an append-only `journal.jsonl`. `status` renders graph position; `history` renders the full audit trail (generation, test results, edges taken, human decisions). |
-| **Pausable** | `pause` writes a control flag honored at the next node boundary → `RUN_PAUSED` event. `--step N` additionally bounds any drive to N nodes. |
-| **Recoverable** | Run state is **never held in memory as the source of truth** — it is a pure fold (`state.replay`) over the journal. Kill the process anywhere; `resume` replays and continues. Node execution is at-least-once and safe to repeat. |
-| **HITL** | The `hitl` node type; decisions are journaled events that route the graph (`on_approve` / `on_reject`). |
-| **Version promotion & rollback** | Promoted artifacts are immutable `vN.py` files; `manifest.json` keeps a `current` pointer plus a promote/rollback log. Rollback is an O(1) pointer move, never a delete. |
-| **DSH-first** | `DeepSeekHarness` is the default whenever `DEEPSEEK_API_KEY` is set (model/base URL overridable via env). |
-| **Harness-neutral** | The supervisor depends only on `Harness.complete(system, user) -> str`. DeepSeek, any OpenAI-compatible endpoint, and the offline mock are interchangeable via `--harness`; a run records its harness in `meta.json` so resume is consistent. Adding Claude/Qwen/local = one subclass + one registry line. |
+| **Observable** | Every transition is a journal event: node starts, effect intents/results, verifier results (full), holdout results, HITL requests/decisions with actor, promotions. `status` / `history` render it. |
+| **Pausable** | `pause` control flag honored at node boundaries; `--step N` bounds any drive; both leave fully journaled state. |
+| **Recoverable — and honest about it** | State is replayed from the journal, so kill-and-resume works anywhere *between* effects. A crash *during* a runtime invocation is different: the intent has no recorded outcome, the reducer derives `unknown_outcome`, and both `drive` and `resume` **refuse to re-execute**. A human inspects the workspace and resolves (`not-executed` → safe re-run; `completed` → recover `candidate.py` as the result). Both resolutions are journaled with the acting user. |
+| **No self-reported success** | The runtime cannot mark anything done. The verifier runs the candidate in a separate interpreter with a timeout; the holdout gate re-runs hidden cases; `promote` re-checks all preconditions itself instead of trusting the path that reached it. |
+| **HITL that actually authorizes** | An approval request carries `request_id` + candidate SHA-256 + spec revision. A decision is refused if the workspace candidate no longer matches the hash the human was shown; the decision event records the binding and the acting OS user; `promote` independently re-verifies approval-hash == current-candidate-hash. |
+| **Anti-overfitting** | Specs declare `holdout_tests` that never appear in the brief. On holdout failure the agent receives only a generic "do not overfit" message — the hidden inputs/expectations stay out of the loop — so a holdout pass is evidence of generalization, not memorization. |
+| **Version promotion & rollback** | Immutable versions + manifest pointer + audit log; promotion is idempotent per run (crash-safe); rollback never crosses tasks and never deletes. |
 
-## Design decisions
+## What CI does and does not prove
 
-1. **Event sourcing over mutable state.** One reducer (`state.py`) is the
-   single definition of "where is this run". Recovery, resume, status, and
-   HITL routing are all the same code path, so there is no way for the
-   "recovery path" to rot separately from the happy path.
-2. **At-least-once node semantics.** A crash *inside* a node re-executes that
-   node on resume. Generation and verification are idempotent-safe;
-   promotion only ever appends a new immutable version. This is much simpler
-   than exactly-once and honest about what a single-box MVP can guarantee.
-3. **The graph is data, not code.** The demo task ships its own graph in
-   JSON. Different loop shapes (auto-approve, extra review stages, multiple
-   verifiers) are spec changes, not supervisor changes.
-4. **Self-contained runs.** Each run directory holds its task spec copy,
-   meta, journal, and candidates — a run's semantics can't be changed
-   mid-flight by editing the original task file, and any run is portable and
-   auditable after the fact.
-5. **Verification is out-of-process.** Candidates run in a subprocess with a
-   timeout. For untrusted/production use this boundary would become a
-   container or microVM; the seam is already in one place (`verify.py`).
+CI (`.github/workflows/ci.yml`) runs **exactly the local gates** — `ruff`,
+`mypy`, `pytest` at pinned versions (`requirements-dev.txt`) — plus an
+offline end-to-end loop smoke using the mock runtime.
+
+That proves the supervisor's boundaries. It does **not** prove DSH behavior:
+there is no DSH installation in CI, and this project does not pretend
+otherwise. Real-DSH evidence is designed to be *per-run and journaled*
+instead: every run records the runtime's version probe (`HARNESS_PROBED`)
+and every invocation's command, exit code, duration and output tails
+(`EFFECT_RESULT`), so a journal from a real DSH run is self-authenticating.
+The mock's self-improvement is likewise scripted by construction — it
+demonstrates the *loop mechanics*, and is labeled `mock` in every event it
+touches; no claim of learning is made from it.
 
 ## Layout
 
 ```
 loopgraph/
-  journal.py     append-only event log (JSONL)
-  state.py       pure reducer: journal -> run state
-  harness.py     Harness protocol + DeepSeek (DSH) + OpenAI-compatible + mock
-  verify.py      out-of-process test runner -> structured feedback
-  versions.py    immutable version store, promote / rollback / manifest log
-  supervisor.py  the graph interpreter (drive loop) + run lifecycle
-  cli.py         run / resume / pause / approve / reject / status / history /
-                 runs / versions / rollback / show
-demo/slugify.json  demo task: goal + tests + its LoopGraph
-runs/              one self-contained directory per run (created at runtime)
-artifacts/         per-task version stores (created at runtime)
+  spec.py          LoopSpec: canonical form, sha256 identity, SpecStore
+  journal.py       append-only event log (JSONL)
+  state.py         pure reducer: journal -> run state (incl. unknown_outcome)
+  harness.py       agent-runtime adapters: DSH (pinned cmd), generic CLI, mock
+  mock_runtime.py  scripted stand-in runtime behind the same subprocess seam
+  verify.py        out-of-process test runner (visible + holdout suites)
+  versions.py      immutable version store: promote / rollback / manifest log
+  supervisor.py    graph interpreter, effect boundary, HITL binding
+  cli.py           run/resume/pause/approve/reject/resolve-effect/status/
+                   history/runs/versions/rollback/show/spec
+demo/              demo LoopSpecs (HITL and auto-approve variants)
+tests/             unit + CLI integration tests (all offline)
+docs/DECISIONS.md  design log: the tradeoffs, in order
 ```
 
-## Known limitations / next steps
+## Known limitations
 
-- Single-box, single-writer per run (no locking across concurrent drivers of
-  the same run). Next: a lease file or SQLite journal with a writer lock.
-- The verifier trusts generated code with subprocess-level isolation only —
-  fine for a demo, would be a sandbox/container in production.
-- "RSI" here improves a *target artifact*; the natural next step is pointing
-  the same loop at the agent's own prompt/policy (the task spec already
-  supports it: the artifact is just a file and the verifier is just a
-  command).
-- Journal `append` re-reads the file for the seq counter (O(n) per event) —
-  trivially replaceable with a kept counter or SQLite for long runs.
+- Single-box, single-writer per run; the unknown-outcome derivation assumes
+  no concurrent driver of the same run. Next step: a writer lease.
+- The OS username on decisions identifies, it does not authenticate. The
+  binding (decision ↔ candidate hash ↔ spec revision) is the load-bearing
+  part; a real deployment would put an authenticated identity in the same
+  field.
+- The verifier isolates by subprocess + timeout only; untrusted candidates
+  would need a container/microVM at the same seam (`verify.py`).
+- Journal appends are O(n) per event (seq recount); fine at demo scale,
+  trivially replaced by a kept counter or SQLite for long runs.
