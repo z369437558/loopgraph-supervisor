@@ -163,7 +163,10 @@ def drive(run: Run, max_nodes: int | None = None):
             f"matches the registered revision {expected[:12]} — the spec is "
             f"immutable; start a new run for a new revision.")
     nodes = task["graph"]["nodes"]
-    harness = make_harness(run.meta["harness"])
+    # The harness is constructed lazily: only the agent node needs it, and a
+    # resume/approve that will only verify or promote must not fail because
+    # the runtime's launch configuration is absent in this shell.
+    harness = None
     executed = 0
 
     while True:
@@ -215,6 +218,8 @@ def drive(run: Run, max_nodes: int | None = None):
         executed += 1
 
         if node["type"] == "agent":
+            if harness is None:
+                harness = make_harness(run.meta["harness"])
             iteration = state["iteration"] + 1
             with open(os.path.join(run.workspace, "instructions.md"), "w",
                       encoding="utf-8") as f:

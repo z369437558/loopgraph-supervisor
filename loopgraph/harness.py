@@ -48,6 +48,14 @@ def _split_template(template: str) -> list:
     return parts
 
 
+def _resolve_executable(argv: list) -> list:
+    """Resolve argv[0] through PATH (honoring PATHEXT on Windows): npm-style
+    launchers install `dsh` as `dsh.cmd`, which the shell finds but a bare
+    CreateProcess does not."""
+    exe = shutil.which(argv[0])
+    return [exe, *argv[1:]] if exe else argv
+
+
 class CliAgentHarness(AgentHarness):
     """Adapter for any CLI agent runtime. The argv template may reference
     {workspace} and {instructions}; the process runs with cwd=workspace."""
@@ -61,7 +69,8 @@ class CliAgentHarness(AgentHarness):
 
     def probe(self) -> dict:
         try:
-            proc = subprocess.run(self.version_argv, capture_output=True,
+            proc = subprocess.run(_resolve_executable(self.version_argv),
+                                  capture_output=True,
                                   text=True, encoding="utf-8",
                                   errors="replace", timeout=60)
         except FileNotFoundError:
@@ -79,8 +88,9 @@ class CliAgentHarness(AgentHarness):
 
     def _argv(self, workspace: str) -> list:
         instructions = os.path.join(workspace, "instructions.md")
-        return [a.format(workspace=workspace, instructions=instructions)
-                for a in self.argv_template]
+        return _resolve_executable(
+            [a.format(workspace=workspace, instructions=instructions)
+             for a in self.argv_template])
 
     def run_task(self, workspace: str) -> dict:
         argv = self._argv(workspace)
