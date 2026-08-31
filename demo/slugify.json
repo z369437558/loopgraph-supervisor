@@ -1,0 +1,21 @@
+{
+  "task_id": "slugify",
+  "goal": "Implement slugify(text): lowercase the input, replace every run of non-alphanumeric characters with a single hyphen, and strip leading/trailing hyphens.",
+  "entry_point": "slugify",
+  "max_iterations": 5,
+  "hitl": true,
+  "tests": [
+    {"input": "Hello World", "expected": "hello-world"},
+    {"input": "  Hello,   World!  ", "expected": "hello-world"},
+    {"input": "Python_3.12 rocks", "expected": "python-3-12-rocks"}
+  ],
+  "graph": {
+    "entry": "generate",
+    "nodes": {
+      "generate": {"type": "agent", "next": "verify"},
+      "verify":   {"type": "verify", "on_pass": "hitl", "on_fail": "generate"},
+      "hitl":     {"type": "hitl", "on_approve": "promote", "on_reject": "generate"},
+      "promote":  {"type": "promote"}
+    }
+  }
+}
